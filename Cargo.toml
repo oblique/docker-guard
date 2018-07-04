@@ -1,0 +1,10 @@
+[package]
+name = "docker-sec-sock"
+version = "0.0.0"
+authors = ["oblique <psyberbits@gmail.com>"]
+
+[dependencies]
+httparse = "1.2.4"
+epoll = "4.0.0"
+error-chain = "0.12.0"
+regex = "1.0.1"
