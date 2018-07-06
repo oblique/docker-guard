@@ -109,37 +109,41 @@ fn read_http_content(reader: &mut Read, http: &Http) -> Result<Vec<u8>> {
     let mut content_buf = Vec::new();
     let headers = http.headers();
 
-    if find_in_headers(headers, "Transfer-Encoding").unwrap_or("") == "chunked" {
-        // read all chunks
-        loop {
-            // read chunked length
-            let mut buf = Vec::new();
-            read_until(reader, &mut buf, b"\r\n")?;
+    if let Some(transfer_encoding) = find_in_headers(headers, "Transfer-Encoding") {
+        if transfer_encoding == "chunked" {
+            // read all chunks
+            loop {
+                // read chunked length
+                let mut buf = Vec::new();
+                read_until(reader, &mut buf, b"\r\n")?;
 
-            let chunked_len = str::from_utf8(&buf)?;
-            let chunked_len = usize::from_str_radix(&chunked_len.trim(), 16)?;
+                let chunked_len = str::from_utf8(&buf)?;
+                let chunked_len = usize::from_str_radix(&chunked_len.trim(), 16)?;
 
-            // read chunk
-            let mut read_chunked_len = 0;
-            while read_chunked_len < chunked_len {
-                let mut buf = [0; 4096];
-                let read_len = cmp::min(chunked_len - read_chunked_len, buf.len());
-                let len = reader.read(&mut buf[..read_len])?;
-                content_buf.extend_from_slice(&buf[..len]);
-                read_chunked_len += len;
+                // read chunk
+                let mut read_chunked_len = 0;
+                while read_chunked_len < chunked_len {
+                    let mut buf = [0; 4096];
+                    let read_len = cmp::min(chunked_len - read_chunked_len, buf.len());
+                    let len = reader.read(&mut buf[..read_len])?;
+                    content_buf.extend_from_slice(&buf[..len]);
+                    read_chunked_len += len;
+                }
+
+                // read CRLF
+                let mut buf = [0; 2];
+                reader.read_exact(&mut buf)?;
+                if buf.ne(b"\r\n") {
+                    return Err("Malformed chunked encoding".into());
+                }
+
+                // stop if this was the last chunk (i.e. zero-length chunk)
+                if chunked_len == 0 {
+                    break;
+                }
             }
-
-            // read CRLF
-            let mut buf = [0; 2];
-            reader.read_exact(&mut buf)?;
-            if buf.ne(b"\r\n") {
-                return Err("Malformed chunked encoding".into());
-            }
-
-            // stop if this was the last chunk (i.e. zero-length chunk)
-            if chunked_len == 0 {
-                break;
-            }
+        } else {
+            return Err(format!("Transfer-Encoding `{}` is not supported", transfer_encoding).into());
         }
     } else if let Some(content_len) = find_in_headers(headers, "Content-Length") {
         if let Ok(mut content_len) = content_len.parse::<usize>() {
