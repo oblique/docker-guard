@@ -13,6 +13,7 @@ use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::str;
+use std::sync::Arc;
 
 error_chain! {
     foreign_links {
@@ -48,6 +49,24 @@ impl<'h, 'b> Http<'h, 'b> {
             Http::Res(res) => &res.headers,
             Http::Req(req) => &req.headers,
         }
+    }
+}
+
+#[derive(Clone)]
+struct Config {
+    allowed_paths: Vec<Regex>,
+}
+
+impl Config {
+    fn new() -> Config {
+        Config {
+            allowed_paths: Vec::new(),
+        }
+    }
+
+    fn add_allowed_path(&mut self, path: &str) -> Result<()> {
+        self.allowed_paths.push(Regex::new(path).chain_err(|| format!("Invalid regex: {}", path))?);
+        Ok(())
     }
 }
 
@@ -298,18 +317,14 @@ where
     Ok(())
 }
 
-fn filter_request_headers(http: &Http) -> Result<bool> {
+fn filter_request_headers(http: &Http, config: &Config) -> Result<bool> {
     let req = http.req().chain_err(|| "HTTP request was expected")?;
-    let _method = req.method.ok_or("Undefined method")?;
     let path = req.path.unwrap_or("/");
 
-    if path == "/_ping" {
-        return Ok(true);
-    }
-
-    let re = Regex::new(r"^/v[0-9\.]+/(containers(/[a-zA-Z0-9][a-zA-Z0-9_\.-]+)?/json)$").unwrap();
-    if re.is_match(path) {
-        return Ok(true);
+    for re in &config.allowed_paths {
+        if re.is_match(path) {
+            return Ok(true);
+        }
     }
 
     Ok(false)
@@ -320,11 +335,18 @@ fn filter_response_headers(http: &Http) -> Result<bool> {
     Ok(true)
 }
 
-fn filter_response_content(http: &Http, content: &mut Vec<u8>) -> Result<bool> {
+fn filter_response_content(
+    config: &Config,
+    http_req: &Http,
+    http_res: &Http,
+    content: &mut Vec<u8>,
+) -> Result<bool> {
+    let http_req = http_req.req()?;
+    let http_res = http_res.res()?;
     Ok(true)
 }
 
-fn handle_client(stream: &mut UnixStream) -> Result<()> {
+fn handle_client(stream: &mut UnixStream, config: Arc<Config>) -> Result<()> {
     // open docker sock
     let mut fwd = UnixStream::connect(DOCKER_SOCK_PATH)?;
 
@@ -332,25 +354,29 @@ fn handle_client(stream: &mut UnixStream) -> Result<()> {
     let mut hdr_buf = Vec::new();
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let http_req = forward_http(stream, &mut fwd, &mut hdr_buf, &mut headers,
-                                filter_request_headers,
-                                |_, _| Ok(true),
-                                )?;
-    if http_req.is_none() {
-        return Ok(());
-    }
+                                |http_req| filter_request_headers(http_req, &config),
+                                |_, _| Ok(true))?;
+    // if http_req is None, then http request was filtered out
+    let http_req = match http_req {
+        Some(v) => v,
+        None => return Ok(()),
+    };
 
     // receive response from docker sock and send it to our sock.
     let mut hdr_buf = Vec::new();
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let http_res = forward_http(&mut fwd, stream, &mut hdr_buf, &mut headers,
                                 filter_response_headers,
-                                filter_response_content,
-                                )?;
-    if http_res.is_none() {
-        return Ok(());
-    }
+                                |http_res, content| {
+                                    filter_response_content(&config, &http_req, http_res, content)
+                                })?;
+    // if http_res is None, then http response was filtered out
+    let http_res = match http_res {
+        Some(v) => v,
+        None => return Ok(()),
+    };
 
-    if is_http_upgraded(&http_req.unwrap(), &http_res.unwrap())? {
+    if is_http_upgraded(&http_req, &http_res)? {
         handle_upgraded(stream, &mut fwd)?;
     }
 
@@ -358,6 +384,20 @@ fn handle_client(stream: &mut UnixStream) -> Result<()> {
 }
 
 fn run() -> Result<()> {
+    let mut config = Arc::new(Config::new());
+
+    {
+        let config = Arc::make_mut(&mut config);
+        // allow: /_ping
+        config.add_allowed_path(r"^/_ping$")?;
+        // allow:
+        //  /v1.37/containers/json
+        //  /v1.37/containers/json?...
+        //  /v1.37/containers/ID/json
+        config.add_allowed_path(r"^/v[0-9\.]+/containers(/[a-zA-Z0-9][a-zA-Z0-9_\.-]+)?/json(\?.*)?$")?;
+    }
+
+    // TODO: do this when listener closes
     fs::remove_file(DOCKER_SEC_SOCK_PATH).ok();
 
     let listener =
@@ -365,15 +405,18 @@ fn run() -> Result<()> {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(mut stream) => std::thread::spawn(move || {
-                if let Err(ref err) = handle_client(&mut stream) {
-                    eprintln!("{}", err.display_chain());
-                }
-            }),
+            Ok(mut stream) => {
+                let config = Arc::clone(&config);
+                std::thread::spawn(move || {
+                    if let Err(ref err) = handle_client(&mut stream, config) {
+                        eprintln!("{}", err.display_chain());
+                    }
+                });
+            }
             Err(e) => {
                 return Err(Error::from(e)).chain_err(|| "Failed to accept incoming connections")
             }
-        };
+        }
     }
 
     Ok(())
