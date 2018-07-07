@@ -3,9 +3,10 @@ extern crate error_chain;
 extern crate epoll;
 extern crate httparse;
 extern crate regex;
+#[macro_use]
+extern crate serde_json;
 
 use error_chain::ChainedError;
-use regex::Regex;
 use std::cmp;
 use std::fs;
 use std::io;
@@ -15,16 +16,26 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::str;
 use std::sync::Arc;
 
-error_chain! {
-    foreign_links {
-        Io(::std::io::Error) #[cfg(unix)];
-        HttpParse(::httparse::Error);
-        Utf8Error(::std::str::Utf8Error);
-        ParseIntError(::std::num::ParseIntError);
+mod config;
+use config::*;
+
+mod filters;
+
+mod errors {
+    error_chain! {
+        foreign_links {
+            Io(::std::io::Error) #[cfg(unix)];
+            HttpParse(::httparse::Error);
+            Utf8Error(::std::str::Utf8Error);
+            ParseIntError(::std::num::ParseIntError);
+            SerdeJson(::serde_json::Error);
+        }
     }
 }
 
-enum Http<'headers, 'buf: 'headers> {
+use errors::*;
+
+pub enum Http<'headers, 'buf: 'headers> {
     Res(httparse::Response<'headers, 'buf>),
     Req(httparse::Request<'headers, 'buf>),
 }
@@ -51,27 +62,6 @@ impl<'h, 'b> Http<'h, 'b> {
         }
     }
 }
-
-#[derive(Clone)]
-struct Config {
-    allowed_paths: Vec<Regex>,
-}
-
-impl Config {
-    fn new() -> Config {
-        Config {
-            allowed_paths: Vec::new(),
-        }
-    }
-
-    fn add_allowed_path(&mut self, path: &str) -> Result<()> {
-        self.allowed_paths.push(Regex::new(path).chain_err(|| format!("Invalid regex: {}", path))?);
-        Ok(())
-    }
-}
-
-static DOCKER_SOCK_PATH: &str = "/var/run/docker.sock";
-static DOCKER_SEC_SOCK_PATH: &str = "/tmp/docker-sec.sock";
 
 fn is_http_upgraded(http_req: &Http, http_res: &Http) -> Result<bool> {
     let http_req = http_req.req()?;
@@ -317,44 +307,29 @@ where
     Ok(())
 }
 
-fn filter_request_headers(http: &Http, config: &Config) -> Result<bool> {
-    let req = http.req().chain_err(|| "HTTP request was expected")?;
-    let path = req.path.unwrap_or("/");
-
-    for re in &config.allowed_paths {
-        if re.is_match(path) {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
-fn filter_response_headers(http: &Http) -> Result<bool> {
-    http.res().chain_err(|| "HTTP response was expected")?;
-    Ok(true)
-}
-
-fn filter_response_content(
-    config: &Config,
-    http_req: &Http,
-    http_res: &Http,
-    content: &mut Vec<u8>,
-) -> Result<bool> {
-    let http_req = http_req.req()?;
-    let http_res = http_res.res()?;
-    Ok(true)
-}
-
 fn handle_client(stream: &mut UnixStream, config: Arc<Config>) -> Result<()> {
     // open docker sock
-    let mut fwd = UnixStream::connect(DOCKER_SOCK_PATH)?;
+    let mut fwd = UnixStream::connect(config.docker_sock_path.to_str().unwrap())?;
+    let mut filter_fn: Option<FilterFn> = None;
 
     // receive request for our sock and send it to the docker sock.
     let mut hdr_buf = Vec::new();
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let http_req = forward_http(stream, &mut fwd, &mut hdr_buf, &mut headers,
-                                |http_req| filter_request_headers(http_req, &config),
+                                // check if request path is allowed and retrieve the filter
+                                // function for the response content.
+                                |http_req| {
+                                    let req = http_req.req().chain_err(|| "HTTP request was expected")?;
+                                    let path = req.path.unwrap_or("/");
+                                    match config.match_path(path) {
+                                        Some(func) => {
+                                            filter_fn = func;
+                                            Ok(true)
+                                        }
+                                        None => Ok(false),
+                                    }
+                                },
+                                // for now we do not support filtering of request content
                                 |_, _| Ok(true))?;
     // if http_req is None, then http request was filtered out
     let http_req = match http_req {
@@ -366,9 +341,20 @@ fn handle_client(stream: &mut UnixStream, config: Arc<Config>) -> Result<()> {
     let mut hdr_buf = Vec::new();
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let http_res = forward_http(&mut fwd, stream, &mut hdr_buf, &mut headers,
-                                filter_response_headers,
+                                // ensure that we received a response
+                                |http_res| http_res
+                                                .res()
+                                                .map(|_| Ok(true))
+                                                .chain_err(|| "HTTP response was expected")?,
+                                // filter content if needed
                                 |http_res, content| {
-                                    filter_response_content(&config, &http_req, http_res, content)
+                                    match filter_fn {
+                                        Some(filter_fn) => filter_fn(&config,
+                                                                     http_req.req().unwrap(),
+                                                                     http_res.res().unwrap(),
+                                                                     content),
+                                        None => Ok(true),
+                                    }
                                 })?;
     // if http_res is None, then http response was filtered out
     let http_res = match http_res {
@@ -388,20 +374,30 @@ fn run() -> Result<()> {
 
     {
         let config = Arc::make_mut(&mut config);
+
         // allow: /_ping
-        config.add_allowed_path(r"^/_ping$")?;
-        // allow:
+        config.allow_path(r"^/_ping$")?;
+        // allow `docker ps`:
         //  /v1.37/containers/json
         //  /v1.37/containers/json?...
+        config.filter_path(r"^/v[0-9\.]+/containers/json(\?.*)?$", filters::list)?;
+        // allow `docker inspect <id>:
         //  /v1.37/containers/ID/json
-        config.add_allowed_path(r"^/v[0-9\.]+/containers(/[a-zA-Z0-9][a-zA-Z0-9_\.-]+)?/json(\?.*)?$")?;
+        //  /v1.37/containers/ID/json?...
+        config.filter_path(r"^/v[0-9\.]+/containers//?[a-zA-Z0-9][a-zA-Z0-9_\.-]+/json(\?.*)?$",
+                           filters::inspect)?;
+
+        config.allow_env_var("PATH");
     }
 
     // TODO: do this when listener closes
-    fs::remove_file(DOCKER_SEC_SOCK_PATH).ok();
+    fs::remove_file(config.docker_guard_path.to_str().unwrap()).ok();
+
+    // TODO: handle unwrap
+    fs::create_dir_all(config.docker_guard_path.parent().unwrap())?;
 
     let listener =
-        UnixListener::bind(DOCKER_SEC_SOCK_PATH).chain_err(|| "Failed to create unix socket")?;
+        UnixListener::bind(config.docker_guard_path.to_str().unwrap()).chain_err(|| "Failed to create unix socket")?;
 
     for stream in listener.incoming() {
         match stream {
