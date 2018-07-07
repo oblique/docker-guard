@@ -43,7 +43,7 @@ version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
-name = "docker-sec-sock"
+name = "docker-guard"
 version = "0.0.0"
 dependencies = [
  "epoll 4.0.0 (registry+https://github.com/rust-lang/crates.io-index)",

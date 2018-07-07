@@ -1,5 +1,5 @@
 [package]
-name = "docker-sec-sock"
+name = "docker-guard"
 version = "0.0.0"
 authors = ["oblique <psyberbits@gmail.com>"]
 license = "MIT"
