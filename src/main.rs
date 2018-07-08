@@ -29,6 +29,7 @@ mod errors {
             Utf8Error(::std::str::Utf8Error);
             ParseIntError(::std::num::ParseIntError);
             SerdeJson(::serde_json::Error);
+            Config(::config::config::ConfigError);
         }
     }
 }

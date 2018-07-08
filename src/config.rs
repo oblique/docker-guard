@@ -1,5 +1,7 @@
+pub extern crate config;
+
 use std::path::PathBuf;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use httparse;
 use regex::Regex;
 
@@ -23,6 +25,22 @@ impl Config {
             allowed_paths: Vec::new(),
             allowed_env_vars: HashSet::new(),
         }
+    }
+
+    pub fn with_file(path: &str) -> Result<Config> {
+        let mut conf = Self::new();
+        let mut settings = config::Config::new();
+
+        settings
+            .set_default("version", "1")?
+            .set_default("docker_sock_path", "/var/run/docker.sock")?
+            .set_default("docker_guard_path", "/var/run/docker-guard/docker.sock")?
+            .merge(config::File::with_name(path))?;
+
+        conf.docker_sock_path = settings.get_str("docker_sock_path")?.into();
+        conf.docker_guard_path = settings.get_str("docker_guard_path")?.into();
+
+        Ok(conf)
     }
 
     pub fn allow_path(&mut self, str_re: &str) -> Result<()> {
