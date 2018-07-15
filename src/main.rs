@@ -5,6 +5,9 @@ extern crate httparse;
 extern crate regex;
 #[macro_use]
 extern crate serde_json;
+#[macro_use]
+extern crate log;
+extern crate env_logger;
 
 use error_chain::ChainedError;
 use std::cmp;
@@ -321,13 +324,18 @@ fn handle_client(stream: &mut UnixStream, config: Arc<Config>) -> Result<()> {
                                 // function for the response content.
                                 |http_req| {
                                     let req = http_req.req().chain_err(|| "HTTP request was expected")?;
+                                    let method = req.method.unwrap_or("UNKNOWN");
                                     let path = req.path.unwrap_or("/");
                                     match config.match_path(path) {
                                         Some(func) => {
                                             filter_fn = func;
+                                            info!("Allow: {} {}", method, path);
                                             Ok(true)
                                         }
-                                        None => Ok(false),
+                                        None => {
+                                            info!("Deny:  {} {}", method, path);
+                                            Ok(false)
+                                        }
                                     }
                                 },
                                 // for now we do not support filtering of request content
@@ -406,7 +414,7 @@ fn run() -> Result<()> {
                 let config = Arc::clone(&config);
                 std::thread::spawn(move || {
                     if let Err(ref err) = handle_client(&mut stream, config) {
-                        eprintln!("{}", err.display_chain());
+                        log_error_chain(err);
                     }
                 });
             }
@@ -419,9 +427,20 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+fn log_error_chain(err: &Error) {
+    error!("Error: {}", err);
+    for err in err.iter().skip(1) {
+        error!("Caused by: {}", err);
+    }
+}
+
 fn main() {
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .init();
+
     if let Err(ref e) = run() {
-        eprintln!("{}", e.display_chain());
+        log_error_chain(e);
         std::process::exit(1);
     }
 }
