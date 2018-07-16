@@ -326,7 +326,7 @@ fn handle_client(stream: &mut UnixStream, config: Arc<Config>) -> Result<()> {
                                     let req = http_req.req().chain_err(|| "HTTP request was expected")?;
                                     let method = req.method.unwrap_or("UNKNOWN");
                                     let path = req.path.unwrap_or("/");
-                                    match config.match_path(path) {
+                                    match config.match_http_path(path) {
                                         Some(func) => {
                                             filter_fn = func;
                                             info!("Allow: {} {}", method, path);
@@ -379,28 +379,26 @@ fn handle_client(stream: &mut UnixStream, config: Arc<Config>) -> Result<()> {
 }
 
 fn run() -> Result<()> {
-    let mut config = Arc::new(Config::new());
+    let mut config = Arc::new(Config::new()?);
 
     {
         let config = Arc::make_mut(&mut config);
 
         // allow: /_ping
-        config.allow_path(r"^/_ping$")?;
+        config.allow_http_path(r"^/_ping$")?;
         // allow `docker version`
-        config.allow_path(r"^(/v[0-9\.]+)?/version$")?;
+        config.allow_http_path(r"^(/v[0-9\.]+)?/version$")?;
         // allow `docker info`
-        config.filter_path(r"^(/v[0-9\.]+)?/info$", filters::info)?;
+        config.filter_http_path(r"^(/v[0-9\.]+)?/info$", filters::info)?;
         // allow `docker ps`:
         //  /containers/json?..
         //  /v1.37/containers/json?..
-        config.filter_path(r"^(/v[0-9\.]+)?/containers/json(\?.*)?$", filters::list)?;
+        config.filter_http_path(r"^(/v[0-9\.]+)?/containers/json(\?.*)?$", filters::list)?;
         // allow `docker inspect <id>`:
         //  /containers/ID/json?..
         //  /v1.37/containers/ID/json?..
-        config.filter_path(r"^(/v[0-9\.]+)?/containers//?[a-zA-Z0-9][a-zA-Z0-9_\.-]+/json(\?.*)?$",
+        config.filter_http_path(r"^(/v[0-9\.]+)?/containers//?[a-zA-Z0-9][a-zA-Z0-9_\.-]+/json(\?.*)?$",
                            filters::inspect)?;
-
-        config.allow_env_var("PATH");
     }
 
     // TODO: do this when listener closes

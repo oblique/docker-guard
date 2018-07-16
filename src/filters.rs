@@ -54,7 +54,7 @@ pub fn inspect(
             if let Value::String(env) = env {
                 if let Some(caps) = re.captures(env) {
                     let name = caps.get(1).unwrap().as_str();
-                    if config.valid_env_var(name) {
+                    if config.whitelisted_env(name) {
                         new_env.push(json!(env));
                     }
                 }

@@ -1,0 +1,4 @@
+env_whitelist:
+    - "PATH"
+    - "VIRTUAL_HOST"
+    - "VIRTUAL_PORT"
