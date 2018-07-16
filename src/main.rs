@@ -390,10 +390,10 @@ fn run() -> Result<()> {
         //  /containers/json?..
         //  /v1.37/containers/json?..
         config.filter_path(r"^(/v[0-9\.]+)?/containers/json(\?.*)?$", filters::list)?;
-        // allow `docker inspect <id>:
-        //  /v1.37/containers/ID/json
-        //  /v1.37/containers/ID/json?...
-        config.filter_path(r"^/v[0-9\.]+/containers//?[a-zA-Z0-9][a-zA-Z0-9_\.-]+/json(\?.*)?$",
+        // allow `docker inspect <id>`:
+        //  /containers/ID/json?..
+        //  /v1.37/containers/ID/json?..
+        config.filter_path(r"^(/v[0-9\.]+)?/containers//?[a-zA-Z0-9][a-zA-Z0-9_\.-]+/json(\?.*)?$",
                            filters::inspect)?;
 
         config.allow_env_var("PATH");

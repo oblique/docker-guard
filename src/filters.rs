@@ -45,37 +45,35 @@ pub fn inspect(
         return Ok(false);
     }
 
-    let mut json: Value = serde_json::from_slice(&content[..])?;
+    let json: Value = serde_json::from_slice(&content[..])?;
     let mut new_env = Vec::new();
 
-    match json["Config"]["Env"] {
-        Value::Array(ref envs) => {
-            let re = Regex::new("^([^=]+)=(.+)$").unwrap();
-            for env in envs {
-                if let Value::String(env) = env {
-                    if let Some(caps) = re.captures(env) {
-                        let name = caps.get(1).unwrap().as_str();
-                        if config.valid_env_var(name) {
-                            new_env.push(json!(env));
-                        }
+    if let Value::Array(ref envs) = json["Config"]["Env"] {
+        let re = Regex::new("^([^=]+)=(.+)$").unwrap();
+        for env in envs {
+            if let Value::String(env) = env {
+                if let Some(caps) = re.captures(env) {
+                    let name = caps.get(1).unwrap().as_str();
+                    if config.valid_env_var(name) {
+                        new_env.push(json!(env));
                     }
                 }
             }
         }
-        _ => { }
     }
 
-    if new_env.is_empty() {
-        // remove Config.Env if exists
-        if let Value::Object(ref mut obj) = json["Config"] {
-            obj.remove("Env");
+    let new_json = json!({
+        "Id": json["Id"],
+        "Name": json["Name"],
+        "State": json["State"],
+        "NetworkSettings": json["NetworkSettings"],
+        "Config": {
+            "Env": new_env,
         }
-    } else {
-        // set the new environment variables
-        json["Config"]["Env"] = json!(new_env);
+    });
+        }
     }
 
-    content.clear();
-    content.extend_from_slice(serde_json::to_string(&json)?.as_bytes());
+    *content = serde_json::to_vec(&new_json)?;
     Ok(true)
 }
