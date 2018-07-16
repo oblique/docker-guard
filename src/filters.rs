@@ -71,6 +71,49 @@ pub fn inspect(
             "Env": new_env,
         }
     });
+
+    *content = serde_json::to_vec(&new_json)?;
+    Ok(true)
+}
+
+/// Filter for `docker info`
+pub fn info(
+    _config: &Config,
+    _req: &httparse::Request,
+    res: &httparse::Response,
+    content: &mut Vec<u8>,
+) -> Result<bool> {
+    if res.code.unwrap_or(0) != 200 {
+        return Ok(false);
+    }
+
+    let json: Value = serde_json::from_slice(&content[..])?;
+    let mut new_json: Value = json!({});
+
+    for x in [
+        "Containers",
+        "ContainersRunning",
+        "ContainersPaused",
+        "ContainersStopped",
+        "Images",
+        "MemoryLimit",
+        "SwapLimit",
+        "KernelMemory",
+        "CpuCfsPeriod",
+        "CpuCfsQuota",
+        "CPUShares",
+        "CPUSet",
+        "IPv4Forwarding",
+        "BridgeNfIptables",
+        "BridgeNfIp6tables",
+        "OomKillDisable",
+        "NCPU",
+        "MemTotal",
+        "Name",
+        "ServerVersion",
+    ].iter() {
+        if !json[x].is_null() {
+            new_json[x] = json[x].clone();
         }
     }
 

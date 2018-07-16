@@ -388,6 +388,8 @@ fn run() -> Result<()> {
         config.allow_path(r"^/_ping$")?;
         // allow `docker version`
         config.allow_path(r"^(/v[0-9\.]+)?/version$")?;
+        // allow `docker info`
+        config.filter_path(r"^(/v[0-9\.]+)?/info$", filters::info)?;
         // allow `docker ps`:
         //  /containers/json?..
         //  /v1.37/containers/json?..
