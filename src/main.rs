@@ -1,3 +1,4 @@
+#![recursion_limit="1024"]
 #[macro_use]
 extern crate error_chain;
 extern crate epoll;
@@ -9,7 +10,6 @@ extern crate serde_json;
 extern crate log;
 extern crate env_logger;
 
-use error_chain::ChainedError;
 use std::cmp;
 use std::fs;
 use std::io;
@@ -387,9 +387,9 @@ fn run() -> Result<()> {
         // allow: /_ping
         config.allow_path(r"^/_ping$")?;
         // allow `docker ps`:
-        //  /v1.37/containers/json
-        //  /v1.37/containers/json?...
-        config.filter_path(r"^/v[0-9\.]+/containers/json(\?.*)?$", filters::list)?;
+        //  /containers/json?..
+        //  /v1.37/containers/json?..
+        config.filter_path(r"^(/v[0-9\.]+)?/containers/json(\?.*)?$", filters::list)?;
         // allow `docker inspect <id>:
         //  /v1.37/containers/ID/json
         //  /v1.37/containers/ID/json?...

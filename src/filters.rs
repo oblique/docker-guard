@@ -11,11 +11,26 @@ pub fn list(
     _config: &Config,
     _req: &httparse::Request,
     res: &httparse::Response,
-    _content: &mut Vec<u8>,
+    content: &mut Vec<u8>,
 ) -> Result<bool> {
     if res.code.unwrap_or(0) != 200 {
         return Ok(false);
     }
+
+    let json: Value = serde_json::from_slice(&content[..])?;
+    let mut new_list = Vec::new();
+
+    if let Value::Array(ref containers) = json {
+        for container in containers {
+            new_list.push(json!({
+                "Id": container["Id"],
+                "Created": container["Created"],
+                "Status": container["Status"],
+            }));
+        }
+    }
+
+    *content = serde_json::to_vec(&json!(new_list))?;
     Ok(true)
 }
 
