@@ -2,6 +2,7 @@
 #[macro_use]
 extern crate error_chain;
 extern crate epoll;
+extern crate fs2;
 extern crate httparse;
 extern crate regex;
 #[macro_use]
@@ -18,6 +19,9 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::str;
 use std::sync::Arc;
+use std::fs::File;
+
+use fs2::FileExt;
 
 mod config;
 use config::*;
@@ -401,14 +405,17 @@ fn run() -> Result<()> {
                            filters::inspect)?;
     }
 
-    // TODO: do this when listener closes
-    fs::remove_file(config.docker_guard_path.to_str().unwrap()).ok();
+    // create docker_guard_path
+    fs::create_dir_all(&config.docker_guard_path)?;
 
-    // TODO: handle unwrap
-    fs::create_dir_all(config.docker_guard_path.parent().unwrap())?;
+    // allow only one instance per docker_guard_path
+    let lock_file = File::create(config.docker_guard_path.join("lock"))?;
+    lock_file.try_lock_exclusive().chain_err(|| "docker-guard is already running")?;
 
-    let listener =
-        UnixListener::bind(config.docker_guard_path.to_str().unwrap()).chain_err(|| "Failed to create unix socket")?;
+    // create docker.sock of docker-guard
+    fs::remove_file(config.docker_guard_path.join("docker.sock")).ok();
+    let listener = UnixListener::bind(config.docker_guard_path
+                                      .join("docker.sock")).chain_err(|| "Failed to create unix socket")?;
 
     for stream in listener.incoming() {
         match stream {

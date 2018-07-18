@@ -41,7 +41,7 @@ impl Config {
         settings
             .set_default("version", "1")?
             .set_default("docker_sock_path", "/var/run/docker.sock")?
-            .set_default("docker_guard_path", "/var/run/docker-guard/docker.sock")?
+            .set_default("docker_guard_path", "/var/run/docker-guard")?
             .set_default("env_whitelist", Vec::<String>::new())?
             .merge(config::Environment::with_prefix("APP"))?;
 
