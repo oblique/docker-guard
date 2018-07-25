@@ -4,24 +4,30 @@ extern crate error_chain;
 extern crate epoll;
 extern crate fs2;
 extern crate httparse;
+extern crate url;
 extern crate regex;
 #[macro_use]
 extern crate serde_json;
 #[macro_use]
 extern crate log;
 extern crate env_logger;
+#[macro_use]
+extern crate clap;
 
 use std::cmp;
 use std::fs;
 use std::io;
 use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::net::TcpStream;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::str;
 use std::sync::Arc;
 use std::fs::File;
 
 use fs2::FileExt;
+use clap::{App, Arg, ArgMatches};
+use url::Url;
 
 mod config;
 use config::*;
@@ -42,6 +48,21 @@ mod errors {
 }
 
 use errors::*;
+
+trait Stream: Read + Write + AsRawFd {
+    fn as_read_mut(&mut self) -> &mut Read;
+    fn as_write_mut(&mut self) -> &mut Write;
+}
+
+impl<T> Stream for T where T: Read + Write + AsRawFd {
+    fn as_read_mut(&mut self) -> &mut Read {
+        self
+    }
+
+    fn as_write_mut(&mut self) -> &mut Write {
+        self
+    }
+}
 
 pub enum Http<'headers, 'buf: 'headers> {
     Res(httparse::Response<'headers, 'buf>),
@@ -278,10 +299,7 @@ where
     Ok(Some(http))
 }
 
-fn handle_upgraded<T>(stream1: &mut T, stream2: &mut T) -> Result<()>
-where
-    T: Read + Write + AsRawFd,
-{
+fn handle_upgraded(stream1: &mut Stream, stream2: &mut Stream) -> Result<()> {
     let epfd = epoll::create(true)?;
 
     let ev = epoll::Event::new(epoll::Events::EPOLLIN, stream1.as_raw_fd() as u64);
@@ -301,11 +319,11 @@ where
 
             let fd = ev.data as RawFd;
             if fd == stream1.as_raw_fd() {
-                if forward_data(stream1, stream2)? == 0 {
+                if forward_data(stream1.as_read_mut(), stream2.as_write_mut())? == 0 {
                     break 'outer;
                 }
             } else if fd == stream2.as_raw_fd() {
-                if forward_data(stream2, stream1)? == 0 {
+                if forward_data(stream2.as_read_mut(), stream1.as_write_mut())? == 0 {
                     break 'outer;
                 }
             }
@@ -315,15 +333,34 @@ where
     Ok(())
 }
 
+fn connect_to_docker(url: &Url) -> Result<Box<Stream>> {
+    match url.scheme() {
+        "unix" => {
+            let path = match url.path() {
+                "/" => "/var/run/docker.sock",
+                path => path,
+            };
+            Ok(Box::new(UnixStream::connect(path)?))
+        }
+        "tcp" => {
+            let host = match url.host_str().unwrap_or("") {
+                "" => "127.0.0.1",
+                host => host,
+            };
+            Ok(Box::new(TcpStream::connect(format!("{}:{}", host, url.port().unwrap_or(2375)))?))
+        }
+        _ => Err("Unsupported docker host uri".into())
+    }
+}
+
 fn handle_client(stream: &mut UnixStream, config: Arc<Config>) -> Result<()> {
-    // open docker sock
-    let mut fwd = UnixStream::connect(config.docker_sock_path.to_str().unwrap())?;
+    let mut fwd = connect_to_docker(&config.docker_host)?;
     let mut filter_fn: Option<FilterFn> = None;
 
     // receive request for our sock and send it to the docker sock.
     let mut hdr_buf = Vec::new();
     let mut headers = [httparse::EMPTY_HEADER; 64];
-    let http_req = forward_http(stream, &mut fwd, &mut hdr_buf, &mut headers,
+    let http_req = forward_http(stream, fwd.as_write_mut(), &mut hdr_buf, &mut headers,
                                 // check if request path is allowed and retrieve the filter
                                 // function for the response content.
                                 |http_req| {
@@ -353,7 +390,7 @@ fn handle_client(stream: &mut UnixStream, config: Arc<Config>) -> Result<()> {
     // receive response from docker sock and send it to our sock.
     let mut hdr_buf = Vec::new();
     let mut headers = [httparse::EMPTY_HEADER; 64];
-    let http_res = forward_http(&mut fwd, stream, &mut hdr_buf, &mut headers,
+    let http_res = forward_http(fwd.as_read_mut(), stream, &mut hdr_buf, &mut headers,
                                 // ensure that we received a response
                                 |http_res| http_res
                                                 .res()
@@ -376,14 +413,14 @@ fn handle_client(stream: &mut UnixStream, config: Arc<Config>) -> Result<()> {
     };
 
     if is_http_upgraded(&http_req, &http_res)? {
-        handle_upgraded(stream, &mut fwd)?;
+        handle_upgraded(stream, &mut *fwd)?;
     }
 
     Ok(())
 }
 
-fn run() -> Result<()> {
-    let mut config = Arc::new(Config::new()?);
+fn run(arg_matches: ArgMatches) -> Result<()> {
+    let mut config = Arc::new(Config::from_arg_matches(arg_matches)?);
 
     {
         let config = Arc::make_mut(&mut config);
@@ -405,16 +442,16 @@ fn run() -> Result<()> {
                            filters::inspect)?;
     }
 
-    // create docker_guard_path
-    fs::create_dir_all(&config.docker_guard_path)?;
+    // create docker_guard_dir
+    fs::create_dir_all(&config.docker_guard_dir)?;
 
-    // allow only one instance per docker_guard_path
-    let lock_file = File::create(config.docker_guard_path.join("lock"))?;
+    // allow only one instance per docker_guard_dir
+    let lock_file = File::create(config.docker_guard_dir.join("lock"))?;
     lock_file.try_lock_exclusive().chain_err(|| "docker-guard is already running")?;
 
     // create docker.sock of docker-guard
-    fs::remove_file(config.docker_guard_path.join("docker.sock")).ok();
-    let listener = UnixListener::bind(config.docker_guard_path
+    fs::remove_file(config.docker_guard_dir.join("docker.sock")).ok();
+    let listener = UnixListener::bind(config.docker_guard_dir
                                       .join("docker.sock")).chain_err(|| "Failed to create unix socket")?;
 
     for stream in listener.incoming() {
@@ -444,11 +481,52 @@ fn log_error_chain(err: &Error) {
 }
 
 fn main() {
+    let matches = App::new(crate_name!())
+        .version(crate_version!())
+        .author(crate_authors!())
+        .arg(Arg::with_name("verbose")
+             .short("v")
+             .multiple(true)
+             .help("Increase verbose level. Can be used multiple times."))
+        .arg(Arg::with_name("ENV_WHITELIST")
+             .short("e")
+             .long("env")
+             .env("ENV_WHITELIST")
+             .takes_value(true)
+             .value_name("VAR_NAME")
+             .multiple(true)
+             .value_delimiter(",")
+             .help("White-list an environment variable. Can be used multiple times."))
+        .arg(Arg::with_name("CONFIG")
+             .short("c")
+             .long("config")
+             .env("CONFIG")
+             .takes_value(true)
+             .default_value("/etc/docker-guard/config.yml")
+             .help("Specify a config file"))
+        .arg(Arg::with_name("DOCKER_HOST")
+             .short("H")
+             .long("host")
+             .env("DOCKER_HOST")
+             .takes_value(true)
+             .default_value("unix:///var/run/docker.sock")
+             .help("Docker socket to connect"))
+        .get_matches();
+
+    let log_level =
+        match matches.occurrences_of("verbose") {
+            0 => log::LevelFilter::Warn, // Error and Warn levels are always logged
+            1 => log::LevelFilter::Info,
+            2 => log::LevelFilter::Debug,
+            3 => log::LevelFilter::Trace,
+            _ => log::LevelFilter::max(),
+        };
+
     env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
+        .filter_level(log_level)
         .init();
 
-    if let Err(ref e) = run() {
+    if let Err(ref e) = run(matches) {
         log_error_chain(e);
         std::process::exit(1);
     }

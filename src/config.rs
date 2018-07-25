@@ -2,19 +2,19 @@ pub extern crate config;
 
 use std::path::PathBuf;
 use std::collections::HashSet;
-use std::iter::FromIterator;
-use std::env;
 use std::path::Path;
 
 use httparse;
 use regex::Regex;
+use url::Url;
+use clap::ArgMatches;
 
 use errors::*;
 
 #[derive(Clone)]
 pub struct Config {
-    pub docker_sock_path: PathBuf,
-    pub docker_guard_path: PathBuf,
+    pub docker_host: Url,
+    pub docker_guard_dir: PathBuf,
     http_path_whitelist: Vec<(Regex, Option<FilterFn>)>,
     env_whitelist: HashSet<String>,
 }
@@ -22,44 +22,34 @@ pub struct Config {
 pub type FilterFn = fn(&Config, &httparse::Request, &httparse::Response, &mut Vec<u8>) -> Result<bool>;
 
 impl Config {
-    fn config_file_path() -> Option<String> {
-        match env::var("CONFIG") {
-            Ok(path) => Some(path),
-            Err(_) => {
-                let path = "/etc/docker-guard/config.yml".to_string();
-                match Path::new(&path).exists() {
-                    true => Some(path),
-                    false => None,
-                }
+    pub fn from_arg_matches(matches: ArgMatches) -> Result<Config> {
+        let docker_host = matches.value_of("DOCKER_HOST").unwrap();
+        let docker_host = Url::parse(docker_host).chain_err(|| format!("Invalid uri: {}", docker_host))?;
+
+        let mut env_whitelist =
+            match matches.values_of("ENV_WHITELIST") {
+                Some(envs) => envs.into_iter().map(|x| x.to_owned()).collect(),
+                None => HashSet::new(),
+            };
+
+        let mut settings = config::Config::new();
+        settings.set_default("env_whitelist", Vec::<String>::new())?;
+
+        if let Some(config_file) = matches.value_of("CONFIG") {
+            if Path::new(config_file).is_file() {
+                settings.merge(config::File::with_name(&config_file))?;
             }
         }
-    }
 
-    pub fn new() -> Result<Config> {
-        let mut settings = config::Config::new();
-
-        settings
-            .set_default("version", "1")?
-            .set_default("docker_sock_path", "/var/run/docker.sock")?
-            .set_default("docker_guard_path", "/var/run/docker-guard")?
-            .set_default("env_whitelist", Vec::<String>::new())?
-            .merge(config::Environment::with_prefix("APP"))?;
-
-        if let Some(path) = Config::config_file_path() {
-            settings.merge(config::File::with_name(&path))?;
-        }
-
-        let docker_sock_path = settings.get_str("docker_sock_path")?.into();
-        let docker_guard_path = settings.get_str("docker_guard_path")?.into();
-        let env_whitelist = HashSet::from_iter(settings
-                                               .get_array("env_whitelist")
-                                               .chain_err(|| "Expecting a list for env_whitelist")?
-                                               .into_iter()
-                                               .filter_map(|v| v.into_str().ok()));
+        env_whitelist.extend(settings
+                             .get_array("env_whitelist")
+                             .chain_err(|| "env_whitelist in config file must be a list, not a single value")?
+                             .into_iter()
+                             .filter_map(|v| v.into_str().ok()));
 
         Ok(Config {
-            docker_sock_path: docker_sock_path,
-            docker_guard_path: docker_guard_path,
+            docker_host: docker_host,
+            docker_guard_dir: PathBuf::from("/var/run/docker-guard"),
             http_path_whitelist: Vec::new(),
             env_whitelist: env_whitelist,
         })
