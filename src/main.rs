@@ -443,16 +443,21 @@ fn run(arg_matches: ArgMatches) -> Result<()> {
     }
 
     // create docker_guard_dir
-    fs::create_dir_all(&config.docker_guard_dir)?;
+    fs::create_dir_all(&config.docker_guard_dir)
+        .chain_err(|| format!("Failed to create `{}` directory",
+                              config.docker_guard_dir.as_path().to_string_lossy()))?;
 
     // allow only one instance per docker_guard_dir
-    let lock_file = File::create(config.docker_guard_dir.join("lock"))?;
+    let lock_file_path = config.docker_guard_dir.join("lock").as_path().to_owned();
+    let lock_file = File::create(&lock_file_path)
+        .chain_err(|| format!("Failed to open `{}` file", lock_file_path.to_string_lossy()))?;
     lock_file.try_lock_exclusive().chain_err(|| "docker-guard is already running")?;
 
     // create docker.sock of docker-guard
-    fs::remove_file(config.docker_guard_dir.join("docker.sock")).ok();
-    let listener = UnixListener::bind(config.docker_guard_dir
-                                      .join("docker.sock")).chain_err(|| "Failed to create unix socket")?;
+    let docker_guard_sock = config.docker_guard_dir.join("docker.sock").as_path().to_owned();
+    fs::remove_file(&docker_guard_sock).ok();
+    let listener = UnixListener::bind(&docker_guard_sock)
+        .chain_err(|| format!("Failed to create `{}` socket", docker_guard_sock.to_string_lossy()))?;
 
     for stream in listener.incoming() {
         match stream {
